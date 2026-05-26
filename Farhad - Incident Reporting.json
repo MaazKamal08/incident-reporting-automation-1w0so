@@ -1,0 +1,665 @@
+{
+  "name": "Farhad - Incident Reporting",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "unit": "minutes"
+            }
+          ]
+        },
+        "documentId": {
+          "__rl": true,
+          "value": "1xR9eC9-0QtWOFQOuA9dXRVXBxK1w_EEBfOEk63XXl2o",
+          "mode": "list",
+          "cachedResultName": "n8ntest"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1"
+        },
+        "options": {}
+      },
+      "id": "767fd075-0146-4258-9b70-95158adbd207",
+      "name": "Google Sheets Trigger",
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [
+        -656,
+        144
+      ],
+      "credentials": {
+        "googleSheetsTriggerOAuth2Api": {
+          "id": "H4OTm2CbZWP39Lue",
+          "name": "Google Sheets Trigger account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const allRows = $input.all();\nif (allRows.length === 0) return []; \n\nconst lastRow = allRows.at(-1).json;\n\n// 1. Incident ID Logic\nconst sheetID = String(lastRow['Incident ID'] || '').trim();\nconst rowNum  = lastRow['row_number'] ?? lastRow['__rowNumber'] ?? Date.now();\nconst incidentId = sheetID || ('INC-' + String(rowNum).padStart(4, '0'));\n\n// 2. Phishing Check\nconst typeRaw = String(lastRow['Incident Type'] || '').trim();\nconst is_phishing = typeRaw.toLowerCase().includes('phishing') || typeRaw.toLowerCase().includes('suspicious email');\n\n// 3. Date Parsing Logic (Special Fix for \"46124\" format)\nconst parseDate = (rawDate) => {\n    if (!rawDate) return '';\n    \n    // Agar date number format mein hai (jaise 46124)\n    const num = Number(rawDate);\n    if (!isNaN(num) && num > 30000 && num < 60000) {\n        // Excel Serial Date to Date Object\n        const dateObj = new Date((num - 25569) * 86400 * 1000);\n        // Format: YYYY-MM-DD ya aap apni pasand ka format rakh sakte hain\n        return dateObj.toISOString().split('T')[0]; \n    }\n    \n    // Agar date pehle se text hai (jaise \"April 10, 2026\")\n    return String(rawDate).trim();\n};\n\nreturn [{\n  json: {\n    incident_id:        incidentId,\n    reporter_name:      String(lastRow['Reporter Name'] || '').trim(),\n    reporter_email:     String(lastRow['Email'] || '').trim(),\n    department:         String(lastRow['Department'] || '').trim(),\n    incident_type:      typeRaw,\n    \n    // Yahan date logic apply ho raha hai\n    date_of_incident:   parseDate(lastRow['Date of Incident']), \n    \n    eml_file_drive_url: String(lastRow['EML File (Drive URL)'] || '').trim(),\n    description:        String(lastRow['Description'] || '').trim(),\n    is_phishing,\n    severity:           'Low',\n    timestamp_processed: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "d7dfafff-b24e-4905-bfd0-29165b88d8fc",
+      "name": "Parse & Validate Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -432,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-phishing",
+              "leftValue": "={{ $json.is_phishing }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "name": "filter.operator.true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "621b325d-7ceb-4a26-b74e-33367b615034",
+      "name": "Is Phishing?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -208,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "mode": "url",
+          "value": "={{ $json.eml_file_drive_url }}",
+          "__regex": "https:\\/\\/(?:drive|docs)\\.google\\.com(?:\\/.*|)\\/d\\/([0-9a-zA-Z\\-_]+)(?:\\/.*|)"
+        },
+        "options": {}
+      },
+      "id": "d1ac08c9-9122-490f-b13b-c7db48722a8d",
+      "name": "Download EML from Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        16,
+        48
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "xtv8thuKqG76QQN1",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. Pehle binary data ko direct read karo\nconst item = $input.first();\nlet emlContent = '';\n\ntry {\n  const binaryData = await this.helpers.getBinaryDataBuffer(0, 'data');\n  emlContent = binaryData.toString('latin1');\n} catch (e) {\n  throw new Error(\"Binary data 'data' nahi mila. Download node ki output check karein.\");\n}\n\n// 2. Decode quoted-printable logic\nconst decodeQP = (str) => str\n  .replace(/=\\r\\n/g, '').replace(/=\\n/g, '')\n  .replace(/=([0-9A-Fa-f]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));\n\nconst emlDecoded = decodeQP(emlContent);\n\n// 3. Header extractor logic\nconst hdr = (name) => {\n  const m = emlContent.match(new RegExp(`^${name}:\\\\s*(.+)`, 'im'));\n  return m ? m[1].trim() : '';\n};\n\n// 4. Extract URLs & Filter Whitelist\nconst rawUrls = emlDecoded.match(/https?:\\/\\/[^\\s\"'<>\\\\)]+/g) || [];\nconst cleanUrls = [...new Set(\n  rawUrls\n    .map(u => u.replace(/[)\"'<>\\\\]+$/, '').trim())\n    .filter(u => u.length > 10)\n    .filter(u => !u.includes('mail.google.com') && !u.includes('schemas.microsoft') && !u.includes('n8n.io') && !u.includes('keenu.pk'))\n)].slice(0, 5);\n\n// 5. Auth & Hop Analysis\nconst fromHeader = hdr('From');\nconst senderDomain = (fromHeader.match(/@([\\w.-]+)/) || [])[1] || '';\nconst allReceived = [...emlContent.matchAll(/^Received:([\\s\\S]+?)(?=^\\S)/gim)]\n  .map(m => m[1].replace(/\\s+/g, ' ').trim());\n\nconst spfRaw = hdr('Received-SPF');\nconst spf = /pass/i.test(spfRaw) ? 'PASS' : /fail/i.test(spfRaw) ? 'FAIL' : 'UNKNOWN';\nconst dkim = /^DKIM-Signature:/im.test(emlContent) ? 'PRESENT' : 'MISSING';\nconst dmarcRaw = hdr('Authentication-Results');\nconst dmarc = /dmarc=pass/i.test(dmarcRaw) ? 'PASS' : /dmarc=fail/i.test(dmarcRaw) ? 'FAIL' : 'UNKNOWN';\n\nconst authScore = [spf === 'PASS', dkim === 'PRESENT', dmarc === 'PASS'].filter(Boolean).length;\nconst authVerdict = authScore === 3 ? 'TRUSTED' : authScore >= 2 ? 'SUSPICIOUS' : 'UNTRUSTED';\n\nconst fromEmail = (fromHeader.match(/<(.+)>/) || [])[1] || fromHeader;\nconst returnPath = hdr('Return-Path').replace(/[<>]/g, '').trim();\nconst pathMismatch = !!(fromEmail && returnPath && fromEmail !== returnPath);\n\n// --- NAYA LOGIC YAHAN HAI ---\n// Agar cleanUrls mein kuch nahi bacha, toh senderDomain dekho, \n// lekin agar senderDomain bhi keenu.pk ya n8n.io hai toh usko bhi block kardo.\nlet finalVtTarget = cleanUrls[0] || '';\n\nif (!finalVtTarget && senderDomain) {\n    if (!senderDomain.includes('keenu.pk') && !senderDomain.includes('n8n.io')) {\n        finalVtTarget = 'http://' + senderDomain;\n    }\n}\n// -----------------------------\n\n// 6. Return Data\nreturn [{\n  json: {\n    ...item.json,\n    eml_headers: {\n      from: fromHeader,\n      subject: hdr('Subject'),\n      spf, dkim, dmarc,\n      auth_score: `${authScore}/3`,\n      auth_verdict: authVerdict,\n      path_mismatch: pathMismatch,\n      urls: cleanUrls\n    },\n    vt_target: finalVtTarget // Ab ye strictly filtered URL/Domain bhejega\n  }\n}];"
+      },
+      "id": "35beb59b-2383-4642-a12c-2ccdf0f3d65a",
+      "name": "Extract EML Headers & URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst text = `${d.description || ''} ${d.incident_type || ''}`;\n\n// Try to find a full URL first, then a bare domain\nconst fullUrl = (text.match(/https?:\\/\\/[\\w\\-./?=%&#+@!]+/) || [])[0];\nconst domain  = !fullUrl\n  ? (text.match(/\\b([\\w-]+\\.(xyz|com|net|org|io|pk|co|info|biz|online|site|app|dev|link|click)[^\\s]*)/) || [])[1]\n  : null;\n\nconst vt_target = fullUrl || (domain ? 'http://' + domain : '');\n\nreturn [{ json: { ...d, eml_headers: null, vt_target } }];"
+      },
+      "id": "8eba19ca-d74e-4d96-a034-7da7c5b44eac",
+      "name": "Extract URL from Description",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst target = (d.vt_target || '').trim();\n\nif (!target) {\n  return [{ json: { ...d, vt_result: { verdict: 'N/A', malicious: 0, suspicious: 0,\n    harmless: 0, undetected: 0, threat_level: 'NONE', scan_url: '', scanned_url: '' } } }];\n}\n\n// base64url encode per VT v3 spec\nconst urlId = Buffer.from(target).toString('base64')\n  .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=/g, '');\n\nlet vt = {};\ntry {\n  vt = await this.helpers.httpRequest({\n    method:  'GET',\n    url:     `https://www.virustotal.com/api/v3/urls/${urlId}`,\n    headers: { 'x-apikey': $vars.VIRUSTOTAL_API_KEY || '181ff84dff96e105ed77850ac425bd5ce8809b0f314eb7939c972284f768e7e7' },\n    json:    true\n  });\n} catch (e) {\n  vt = { _error: e.message };\n}\n\nconst stats     = vt?.data?.attributes?.last_analysis_stats || {};\nconst malicious  = stats.malicious  || 0;\nconst suspicious = stats.suspicious || 0;\nconst harmless   = stats.harmless   || 0;\nconst undetected = stats.undetected || 0;\n\nconst verdict     = malicious > 0 ? 'MALICIOUS' : suspicious > 0 ? 'SUSPICIOUS' : (!vt._error ? 'CLEAN' : 'ERROR');\nconst threat_level = malicious > 0 ? 'CRITICAL' : suspicious > 0 ? 'HIGH' : 'LOW';\n\nreturn [{\n  json: {\n    ...d,\n    vt_result: {\n      verdict, malicious, suspicious, harmless, undetected, threat_level,\n      scan_url:    vt?.data?.id ? `https://www.virustotal.com/gui/url/${vt.data.id}` : '',\n      scanned_url: target\n    }\n  }\n}];"
+      },
+      "id": "4d3db45c-7914-4881-966a-5b9c503ebd98",
+      "name": "VirusTotal Lookup - Phishing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst target = (d.vt_target || '').trim();\n\nif (!target) {\n  return [{ json: { ...d, vt_result: { verdict: 'N/A', malicious: 0, suspicious: 0,\n    harmless: 0, undetected: 0, threat_level: 'NONE', scan_url: '', scanned_url: '' } } }];\n}\n\n// base64url encode per VT v3 spec\nconst urlId = Buffer.from(target).toString('base64')\n  .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=/g, '');\n\nlet vt = {};\ntry {\n  vt = await this.helpers.httpRequest({\n    method:  'GET',\n    url:     `https://www.virustotal.com/api/v3/urls/${urlId}`,\n    headers: { 'x-apikey': $vars.VIRUSTOTAL_API_KEY || '181ff84dff96e105ed77850ac425bd5ce8809b0f314eb7939c972284f768e7e7' },\n    json:    true\n  });\n} catch (e) {\n  vt = { _error: e.message };\n}\n\nconst stats     = vt?.data?.attributes?.last_analysis_stats || {};\nconst malicious  = stats.malicious  || 0;\nconst suspicious = stats.suspicious || 0;\nconst harmless   = stats.harmless   || 0;\nconst undetected = stats.undetected || 0;\n\nconst verdict     = malicious > 0 ? 'MALICIOUS' : suspicious > 0 ? 'SUSPICIOUS' : (!vt._error ? 'CLEAN' : 'ERROR');\nconst threat_level = malicious > 0 ? 'CRITICAL' : suspicious > 0 ? 'HIGH' : 'LOW';\n\nreturn [{\n  json: {\n    ...d,\n    vt_result: {\n      verdict, malicious, suspicious, harmless, undetected, threat_level,\n      scan_url:    vt?.data?.id ? `https://www.virustotal.com/gui/url/${vt.data.id}` : '',\n      scanned_url: target\n    }\n  }\n}];"
+      },
+      "id": "192aef91-3651-4e1b-ae9e-b97d524bdb2d",
+      "name": "VirusTotal Lookup - Other",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d   = $input.first().json;\nconst vt  = d.vt_result   || {};\nconst hdr = d.eml_headers || {};\n\n// ── EML Analysis: one concise cell ───────────────────────────\nconst emlParts = [\n  `SPF:${hdr.spf || 'N/A'} DKIM:${hdr.dkim || 'N/A'} DMARC:${hdr.dmarc || 'N/A'}`,\n  hdr.path_mismatch   ? 'Return-Path mismatch'      : null,\n  hdr.domain_mismatch ? 'Domain mismatch'            : null,\n  hdr.suspicious_hop  ? `Suspicious hop (${hdr.hop_count} hops)` : null,\n].filter(Boolean).join(' | ');\n\n// ── VT Result: one concise cell ──────────────────────────────\nconst vtSummary = vt.verdict === 'N/A'\n  ? 'No URL found'\n  : `${vt.verdict} | ${vt.scanned_url || ''} | ${vt.scan_url ? vt.scan_url : ''}`;\n\nreturn [{\n  json: {\n    ...d,\n    eml_analysis_summary: emlParts || 'No anomalies',\n    vt_summary: vtSummary\n  }\n}];"
+      },
+      "id": "82e1bb90-0464-43ee-aee6-7702c571cb28",
+      "name": "Build Summary - Phishing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d  = $input.first().json;\nconst vt = d.vt_result || {};\n\nconst vtSummary = vt.verdict === 'N/A'\n  ? 'No URL found'\n  : `${vt.verdict} | ${vt.scanned_url || ''} | ${vt.scan_url ? vt.scan_url : ''}`;\n\nreturn [{\n  json: {\n    ...d,\n    eml_analysis_summary: '',\n    vt_summary: vtSummary\n  }\n}];"
+      },
+      "id": "bd27f550-02bb-496f-8a73-d6af02306aca",
+      "name": "Build Summary - Other",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\n\n// Use incident_id already generated in Parse step; just create ticket ref\nconst ticketId  =  d.incident_id;\nconst ticketUrl = `https://keenu.atlassian.net/browse/${ticketId}`;\n\nreturn [{ json: { ...d, jira_ticket_id: ticketId, jira_ticket_url: ticketUrl } }];"
+      },
+      "id": "d846300c-5c8d-4822-a250-5e8db8f3f2fc",
+      "name": "Generate Dummy Jira - Phishing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\n\n// Use incident_id already generated in Parse step; just create ticket ref\nconst ticketId  = d.incident_id;\nconst ticketUrl = `https://keenu.atlassian.net/browse/${ticketId}`;\n\nreturn [{ json: { ...d, jira_ticket_id: ticketId, jira_ticket_url: ticketUrl } }];"
+      },
+      "id": "91a8ac45-f112-4b7a-887a-9996c3c3c7c9",
+      "name": "Generate Dummy Jira - Other",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        688,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1xR9eC9-0QtWOFQOuA9dXRVXBxK1w_EEBfOEk63XXl2o",
+          "mode": "list",
+          "cachedResultName": "n8ntest"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 2133750295,
+          "mode": "list",
+          "cachedResultName": "Sheet2"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Incident ID": "={{ $json.incident_id }}",
+            "Date Reported": "={{ $json.date_of_incident }}",
+            "Reporter": "={{ $json.reporter_name }}",
+            "Department": "={{ $json.department }}",
+            "Incident Type": "={{ $json.incident_type }}",
+            "Severity": "={{ $json.severity }}",
+            "Status": "Under Review",
+            "EML Analysis": "={{ $json.eml_analysis_summary }}",
+            "VT Result": "={{ $json.vt_summary }}",
+            "Ticket ID": "={{ $json.jira_ticket_id }}"
+          },
+          "matchingColumns": [
+            "Incident ID"
+          ],
+          "schema": [
+            {
+              "id": "Incident ID",
+              "displayName": "Incident ID",
+              "required": false,
+              "defaultMatch": true,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Date Reported",
+              "displayName": "Date Reported",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Reporter",
+              "displayName": "Reporter",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Department",
+              "displayName": "Department",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Incident Type",
+              "displayName": "Incident Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Severity",
+              "displayName": "Severity",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "EML Analysis",
+              "displayName": "EML Analysis",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "VT Result",
+              "displayName": "VT Result",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Ticket ID",
+              "displayName": "Ticket ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "7cf6bd92-9207-4269-a2b3-63ba38a2c04b",
+      "name": "Update Sheet - Phishing",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1136,
+        48
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "wHF186lfpWWpvdSz",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1xR9eC9-0QtWOFQOuA9dXRVXBxK1w_EEBfOEk63XXl2o",
+          "mode": "list",
+          "cachedResultName": "n8ntest"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 2133750295,
+          "mode": "list",
+          "cachedResultName": "Sheet2"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Incident ID": "={{ $json.incident_id }}",
+            "Date Reported": "={{ $json.date_of_incident }}",
+            "Reporter": "={{ $json.reporter_name }}",
+            "Department": "={{ $json.department }}",
+            "Incident Type": "={{ $json.incident_type }}",
+            "Severity": "={{ $json.severity }}",
+            "Status": "Under Review",
+            "EML Analysis": "={{ $json.eml_analysis_summary }}",
+            "VT Result": "={{ $json.vt_summary }}",
+            "Ticket ID": "={{ $json.jira_ticket_id }}"
+          },
+          "matchingColumns": [
+            "Incident ID"
+          ],
+          "schema": [
+            {
+              "id": "Incident ID",
+              "displayName": "Incident ID",
+              "required": false,
+              "defaultMatch": true,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Date Reported",
+              "displayName": "Date Reported",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Reporter",
+              "displayName": "Reporter",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Department",
+              "displayName": "Department",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Incident Type",
+              "displayName": "Incident Type",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Severity",
+              "displayName": "Severity",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "EML Analysis",
+              "displayName": "EML Analysis",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "VT Result",
+              "displayName": "VT Result",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "Ticket ID",
+              "displayName": "Ticket ID",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "8d59a81b-4539-4788-8bca-5ff073376dc9",
+      "name": "Update Sheet - Other",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        912,
+        240
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "wHF186lfpWWpvdSz",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Google Sheets Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse & Validate Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Validate Row": {
+      "main": [
+        [
+          {
+            "node": "Is Phishing?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Phishing?": {
+      "main": [
+        [
+          {
+            "node": "Download EML from Drive",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract URL from Description",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download EML from Drive": {
+      "main": [
+        [
+          {
+            "node": "Extract EML Headers & URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract EML Headers & URLs": {
+      "main": [
+        [
+          {
+            "node": "VirusTotal Lookup - Phishing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VirusTotal Lookup - Phishing": {
+      "main": [
+        [
+          {
+            "node": "Build Summary - Phishing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Summary - Phishing": {
+      "main": [
+        [
+          {
+            "node": "Generate Dummy Jira - Phishing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract URL from Description": {
+      "main": [
+        [
+          {
+            "node": "VirusTotal Lookup - Other",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VirusTotal Lookup - Other": {
+      "main": [
+        [
+          {
+            "node": "Build Summary - Other",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Summary - Other": {
+      "main": [
+        [
+          {
+            "node": "Generate Dummy Jira - Other",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Dummy Jira - Phishing": {
+      "main": [
+        [
+          {
+            "node": "Update Sheet - Phishing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Dummy Jira - Other": {
+      "main": [
+        [
+          {
+            "node": "Update Sheet - Other",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "executionTimeout": 300,
+    "availableInMCP": false
+  },
+  "versionId": "75945d4d-e70f-4314-86db-f713fd3de289",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "3127e0702a73301f3dd2c5019e9732e437e6d3bef84a4f13fdb7f52d826473ea"
+  },
+  "id": "4DJEZZZdIW072Pg8",
+  "tags": []
+}
